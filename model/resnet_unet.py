@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import random
-import kagglehub
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.optim import AdamW
 
@@ -23,17 +22,14 @@ from loss.focal_dice_loss import DiceLoss, Focal_Dice_Loss
 # double conv function
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
-        """
-     
-        """
         super().__init__()
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),  # İlk konvolüsyon
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),  # Conv2D
             nn.BatchNorm2d(out_channels),                                    # Batch normalization
-            nn.ReLU(inplace=True),                                           # Aktivasyon (ReLU)
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1), # İkinci konvolüsyon
+            nn.ReLU(inplace=True),                                           #  (ReLU)
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1), # Conv2D
             nn.BatchNorm2d(out_channels),                                    # Batch normalization
-            nn.ReLU(inplace=True)                                            # Aktivasyon (ReLU)
+            nn.ReLU(inplace=True)                                         
         )
 
     def forward(self, x):
