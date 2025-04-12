@@ -243,7 +243,7 @@ class Focal_Dice_Loss(nn.Module):
         
         # Combine losses
         combined_loss = self.weights['focal'] * focal_loss + self.weights['dice'] * dice_loss
-        
+
         # Apply reduction
         if self.reduction == "none":
             return combined_loss
