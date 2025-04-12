@@ -151,7 +151,7 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=50):
                 
     return history
 
-def train_model_focal_dice(model, train_loader, val_loader, num_epochs=50):
+def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
     """
     Applies a training loop using Focal-Dice Loss on CIFAR10 dataset
     """
@@ -161,9 +161,12 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=50):
     
     model = model.to(device)
     
-    # Define Focal-Dice Loss with alpha tensor explicitly on the correct device
-    alpha = torch.tensor([0.5, 0.5, 0.5, 0.5], device=device)
+    # Define Focal-Dice Loss - pass alpha as a list instead of a tensor
+    alpha = [0.5, 0.5, 0.5, 0.5]  # Pass as regular Python list, not tensor
     criterion = Focal_Dice_Loss(gamma=2, alpha=alpha, weights={'focal': 0.5, 'dice': 0.5})
+    # Move criterion to the same device as the model
+    if hasattr(criterion, 'alpha') and criterion.alpha is not None:
+        criterion.alpha = criterion.alpha.to(device)
     
     # Define AdamW optimization algorithm
     optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
