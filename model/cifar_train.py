@@ -10,6 +10,11 @@ import numpy as np
 import sys
 import os
 
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+
 # Add current and parent directories to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -19,11 +24,10 @@ from loss.focal_loss import FocalLoss
 from loss.focal_dice_loss import Focal_Dice_Loss
 
 
-def train_model_focal(model, train_loader, val_loader, num_epochs=50):
+def train_model_focal(model, train_loader, val_loader, num_epochs=10):
     """
     Applies a training loop using Focal Loss on CIFAR10 dataset
     """
-    # Set device (CPU or GPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
@@ -32,6 +36,9 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=50):
     # Define FocalLoss with weights for 4 classes
     alpha = [1.0, 1.0, 1.0, 1.0]  # Equal weights for all classes
     criterion = FocalLoss(gamma=2, alpha=alpha, reduction="mean")
+    # Move criterion to the same device as the model
+    if hasattr(criterion, 'alpha') and criterion.alpha is not None:
+        criterion.alpha = criterion.alpha.to(device)
     
     # Define AdamW optimization algorithm
     optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
@@ -304,7 +311,7 @@ def main():
     # Set data paths and parameters
     data_dir = "./data"
     batch_size = 64
-    num_epochs = 50
+    num_epochs = 10
     
     # The class names we'll use (first 4 CIFAR10 classes)
     classes = [0, 1, 2, 3]  # airplane, automobile, bird, cat
@@ -322,35 +329,42 @@ def main():
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    # Create training and validation datasets
+    # Create datasets
     print("Loading CIFAR10 dataset...")
-    train_dataset = CIFAR10Subset(root=data_dir, train=True, transform=transform_train, classes=classes)
-    val_dataset = CIFAR10Subset(root=data_dir, train=False, transform=transform_test, classes=classes)
+    full_train_dataset = CIFAR10Subset(root=data_dir, train=True, transform=transform_train, classes=classes)
+    test_dataset = CIFAR10Subset(root=data_dir, train=False, transform=transform_test, classes=classes)
+    
+    # Split training data into train and validation sets (90% train, 10% validation)
+    train_size = int(0.9 * len(full_train_dataset))
+    val_size = len(full_train_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(full_train_dataset, [train_size, val_size])
     
     print(f"Training samples: {len(train_dataset)}")
     print(f"Validation samples: {len(val_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
 
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Initialize model
     print("Initializing ResNetUNet model...")
     model = ResNetUNet(n_classes=4)  # 4 classes
 
     # Choose which loss function to use
-    loss_function = "focal_dice"  # Options: "focal" or "focal_dice"
+    loss_function = "focal"  # Options: "focal" or "focal_dice"
     
-    if loss_function == "focal":
-        print("Training with Focal Loss...")
-        history = train_model_focal(model, train_loader, val_loader, num_epochs=num_epochs)
-        print("Training complete. Best model saved as 'best_model_cifar_focal.pth'.")
-    elif loss_function == "focal_dice":
-        print("Training with Focal-Dice Loss...")
-        history = train_model_focal_dice(model, train_loader, val_loader, num_epochs=num_epochs)
-        print("Training complete. Best model saved as 'best_model_cifar_focal_dice.pth'.")
-    else:
-        print("Invalid loss function specified. Choose 'focal' or 'focal_dice'.")
+    #if loss_function == "focal":
+    print("Training with Focal Loss...")
+    history = train_model_focal(model, train_loader, val_loader, num_epochs=num_epochs)
+    print("Training complete. Best model saved as 'best_model_cifar_focal.pth'.")
+    #elif loss_function == "focal_dice":
+    print("Training with Focal-Dice Loss...")
+    history = train_model_focal_dice(model, train_loader, val_loader, num_epochs=num_epochs)
+    print("Training complete. Best model saved as 'best_model_cifar_focal_dice.pth'.")
+    #else:
+    #    print("Invalid loss function specified. Choose 'focal' or 'focal_dice'.")
 
 if __name__ == "__main__":
     main()
