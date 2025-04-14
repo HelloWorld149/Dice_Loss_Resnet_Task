@@ -4,12 +4,14 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 import torchvision.transforms as transforms
 import numpy as np
 import sys
 import os
+from torchvision.datasets import CIFAR10
 import warnings
+
 
 from sklearn.metrics import f1_score, matthews_corrcoef
 
@@ -20,22 +22,67 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from resnet_unet import ResNetUNet, CIFAR10Subset
+from resnet_unet import ResNetUNet
 from loss.focal_loss import FocalLoss
 from loss.focal_dice_loss import Focal_Dice_Loss
 
 
+# Custom CIFAR10 subset with only selected classes and a desired imbalance ratio
+class CIFAR10Subset(Dataset):
+    def __init__(self, root, train=True, transform=None, download=True, classes=[3, 5], ratio=None):
+        """
+        CIFAR10 dataset with only selected classes.
+        Args:
+            root: Root directory for the dataset.
+            train: If True, use training set, otherwise use test set.
+            transform: Transformations to apply to the images.
+            download: If True, download the dataset.
+            classes: List of class indices to include. (Default: [3, 5] for cat and dog.)
+            ratio: If provided and classes == [3,5], force cat:dog ratio of 1:ratio.
+                   For example, ratio=20 means retain 1 cat for every 20 dog images.
+        """
+        self.full_dataset = CIFAR10(root=root, train=train, transform=transform, download=download)
+        self.class_indices = classes
+        
+        # First, collect all indices of the selected classes.
+        self.indices = [i for i, (_, label) in enumerate(self.full_dataset) if label in self.class_indices]
+        
+        # If a ratio is specified and the selected classes are cat (3) and dog (5), adjust the dataset.
+        if ratio is not None and set(self.class_indices) == {3, 5}:
+            # Separate indices for cat and dog.
+            cat_indices = [i for i in self.indices if self.full_dataset[i][1] == 3]
+            dog_indices = [i for i in self.indices if self.full_dataset[i][1] == 5]
+            # Subsample cat indices: target number is (number of dog images) / ratio.
+            desired_cat_count = len(dog_indices) // ratio
+            if len(cat_indices) > desired_cat_count:
+                cat_indices = np.random.choice(cat_indices, desired_cat_count, replace=False).tolist()
+            # Combine the subsampled cat indices with all dog indices.
+            self.indices = cat_indices + dog_indices
+            # Shuffle the indices for randomness.
+            np.random.shuffle(self.indices)
+        
+        # Create a mapping from old labels to new labels (0 to n_classes-1)
+        self.label_mapping = {old_label: new_label for new_label, old_label in enumerate(self.class_indices)}
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        image, label = self.full_dataset[self.indices[idx]]
+        new_label = self.label_mapping[label]
+        return image, new_label
+
+
 def train_model_focal(model, train_loader, val_loader, num_epochs=10):
     """
-    Applies a training loop using Focal Loss on CIFAR10 dataset.
+    Training loop using Focal Loss on CIFAR10 dataset.
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     model = model.to(device)
     
-    # Define FocalLoss with weights for 4 classes
-    alpha = [1.0, 1.0, 1.0, 1.0]  # Equal weights for all classes
+    alpha = [1.0, 1.0]  # Equal weights for cat and dog
     criterion = FocalLoss(gamma=2, alpha=alpha, reduction="mean")
     if hasattr(criterion, 'alpha') and criterion.alpha is not None:
         criterion.alpha = criterion.alpha.to(device)
@@ -50,6 +97,7 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
     )
     
     best_val_loss = float('inf')
+    best_val_acc = 0
     patience = 10 
     patience_counter = 0
     
@@ -68,11 +116,11 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
 
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device) 
+            optimizer.zero_grad()
+            outputs = model(images)
             
-            optimizer.zero_grad()  
-            outputs = model(images) 
-            
-            if len(outputs.shape) == 4:  # Handle UNet output (B, C, H, W)
+            # Handle potential UNet output
+            if len(outputs.shape) == 4:
                 outputs = outputs.mean([2, 3])
             
             loss = criterion(outputs, labels)  
@@ -81,7 +129,7 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
             optimizer.step()  
             scheduler.step()  
             
-            train_loss += loss.item()            
+            train_loss += loss.item()
             _, predicted = torch.max(outputs, 1)
             train_total += labels.size(0)
             train_correct += (predicted == labels).sum().item()
@@ -97,8 +145,7 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
                 outputs = model(images)
                 if len(outputs.shape) == 4:
                     outputs = outputs.mean([2, 3])
-                    
-                val_loss += criterion(outputs, labels).item()                
+                val_loss += criterion(outputs, labels).item()
                 _, predicted = torch.max(outputs, 1)
                 val_total += labels.size(0)
                 val_correct += (predicted == labels).sum().item()
@@ -117,7 +164,8 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
         print(f'Training Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%')
         print(f'Validation Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%')
         
-        if val_loss < best_val_loss:  # Save based on best validation loss
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             best_val_loss = val_loss
             patience_counter = 0
             torch.save({
@@ -125,32 +173,39 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': best_val_loss,
-                'accuracy': val_acc,
+                'accuracy': best_val_acc,
             }, 'best_model_cifar_focal.pth')
-            print(f"Model saved with validation loss: {best_val_loss:.4f}")
+            print(f"Model saved with validation accuracy: {best_val_acc:.2f}%")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f'Early stopping triggered after epoch {epoch+1}')
                 break
+                
     return history
+
 
 def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
     """
-    Applies a training loop using Focal-Dice Loss on CIFAR10 dataset.
+    Applies a training loop using Focal-Dice Loss on CIFAR10 dataset
     """
+    # Set device (CPU or GPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     model = model.to(device)
     
-    alpha = [0.5, 0.5, 0.5, 0.5]
+    # Define Focal-Dice Loss - pass alpha as a list instead of a tensor
+    alpha = [0.5, 0.5, 0.5, 0.5]  # Pass as regular Python list, not tensor
     criterion = Focal_Dice_Loss(gamma=2, alpha=alpha, weights={'focal': 0.5, 'dice': 0.5})
+    # Move criterion to the same device as the model
     if hasattr(criterion, 'alpha') and criterion.alpha is not None:
         criterion.alpha = criterion.alpha.to(device)
     
+    # Define AdamW optimization algorithm
     optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     
+    # Define learning rate scheduler (OneCycleLR)
     scheduler = OneCycleLR(
         optimizer,
         max_lr=1e-3,
@@ -158,10 +213,13 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
         steps_per_epoch=len(train_loader)
     )
     
+    # Variables to track best validation loss and accuracy
     best_val_loss = float('inf')
+    best_val_acc = 0
     patience = 10 
     patience_counter = 0
     
+    # History for plotting
     history = {
         'train_loss': [],
         'val_loss': [],
@@ -169,35 +227,50 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
         'val_acc': []
     }
     
+    # Training loop
     for epoch in range(num_epochs):
+        # Training Phase
         model.train()  
         train_loss = 0  
         train_correct = 0
         train_total = 0
 
         for images, labels in train_loader:
-            images, labels = images.to(device), labels.to(device)             
+            images, labels = images.to(device), labels.to(device) 
+            
             optimizer.zero_grad()  
             outputs = model(images) 
             
-            if len(outputs.shape) == 4:
-                outputs_for_loss = outputs.mean([2, 3])
+            if len(outputs.shape) == 4:  # Handle UNet output (B, C, H, W)
+                # Average over spatial dimensions for focal loss calculation
+                outputs_for_loss = outputs.mean([2, 3])  # Reduce to [B, C]
+                
+                # Now pass the spatially-reduced outputs to the loss function
                 loss = criterion(outputs_for_loss, labels)
+                
+                # For accuracy calculation, use the same reduced output
                 outputs_for_acc = outputs_for_loss
             else:
+                # For standard classification output
                 loss = criterion(outputs, labels)
-                outputs_for_acc = outputs
+                outputs_for_acc = outputs          
 
             loss.backward()  
+            
+            # Prevent gradient explosion by clipping gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()  
             scheduler.step()  
             
             train_loss += loss.item()
+            
+            # Calculate accuracy
             _, predicted = torch.max(outputs_for_acc, 1)
             train_total += labels.size(0)
             train_correct += (predicted == labels).sum().item()
         
+        # Validation Phase
         model.eval()  
         val_loss = 0
         val_correct = 0
@@ -207,33 +280,42 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
                 outputs = model(images)
-                if len(outputs.shape) == 4:
+                
+                if len(outputs.shape) == 4:  # Handle UNet output
+                    # Average over spatial dimensions
                     outputs_for_loss = outputs.mean([2, 3])
                     val_loss += criterion(outputs_for_loss, labels).item()
                     outputs_for_acc = outputs_for_loss
                 else:
+                    # For standard classification output
                     val_loss += criterion(outputs, labels).item()
                     outputs_for_acc = outputs
                 
+                # Calculate accuracy
                 _, predicted = torch.max(outputs_for_acc, 1)
                 val_total += labels.size(0)
                 val_correct += (predicted == labels).sum().item()
         
+        # Calculate average losses and accuracy
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
         train_acc = 100 * train_correct / train_total
         val_acc = 100 * val_correct / val_total
         
+        # Store history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
         
+        # Print training and validation results
         print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'Training Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%')
         print(f'Validation Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%')
         
-        if val_loss < best_val_loss:  # Save based on best validation loss
+        # Save the best model based on validation accuracy
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             best_val_loss = val_loss
             patience_counter = 0
             torch.save({
@@ -241,20 +323,23 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': best_val_loss,
-                'accuracy': val_acc,
+                'accuracy': best_val_acc,
             }, 'best_model_cifar_focal_dice.pth')
-            print(f"Model saved with validation loss: {best_val_loss:.4f}")
+            print(f"Model saved with validation accuracy: {best_val_acc:.2f}%")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f'Early stopping triggered after epoch {epoch+1}')
                 break
+                
     return history
 
-def evaluate_model(model_path, test_loader, n_classes=4):
+
+
+def evaluate_model(model_path, test_loader, n_classes=2):
     """
     Evaluates a saved model on the test dataset.
-    Computes overall accuracy, per-class accuracy, weighted F1 score, and Matthews Correlation Coefficient (MCC).
+    Computes overall accuracy, per-class accuracy, F1 score, and Matthews Correlation Coefficient (MCC).
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ResNetUNet(n_classes=n_classes)
@@ -269,7 +354,6 @@ def evaluate_model(model_path, test_loader, n_classes=4):
     class_correct = [0] * n_classes
     class_total = [0] * n_classes
 
-    # Lists to accumulate all labels and predictions
     all_labels = []
     all_predictions = []
     
@@ -284,28 +368,28 @@ def evaluate_model(model_path, test_loader, n_classes=4):
             test_total += labels.size(0)
             test_correct += (predicted == labels).sum().item()
             
-            # Accumulate for F1 and MCC
+            # Accumulate per-sample labels for overall metrics.
             all_labels.extend(labels.cpu().numpy())
             all_predictions.extend(predicted.cpu().numpy())
             
+            # Compute per-class counts
             for i in range(labels.size(0)):
-                label = labels[i].item()
-                pred = predicted[i].item()
-                class_total[label] += 1
-                if label == pred:
-                    class_correct[label] += 1
+                lab = labels[i].item()
+                class_total[lab] += 1
+                if predicted[i].item() == lab:
+                    class_correct[lab] += 1
     
     test_acc = 100 * test_correct / test_total
-    class_acc = [100 * correct / total if total > 0 else 0 for correct, total in zip(class_correct, class_total)]
+    class_acc = [100 * c / t if t > 0 else 0 for c, t in zip(class_correct, class_total)]
     
-    # Compute weighted F1 score and MCC using scikit-learn
+    # Compute the weighted F1 score and the Matthews Correlation Coefficient.
     f1 = f1_score(all_labels, all_predictions, average='weighted')
     mcc = matthews_corrcoef(all_labels, all_predictions)
     
     print(f"\nTest Evaluation Results for {model_path}:")
     print(f"Overall Test Accuracy: {test_acc:.2f}%")
     print("Per-class Test Accuracy:")
-    class_names = ['airplane', 'automobile', 'bird', 'cat']
+    class_names = ['cat', 'dog']  # Assuming new labels: 0 for cat, 1 for dog.
     for i, acc in enumerate(class_acc):
         print(f"  {class_names[i]}: {acc:.2f}%")
     print(f"Weighted F1 Score: {f1:.4f}")
@@ -313,17 +397,20 @@ def evaluate_model(model_path, test_loader, n_classes=4):
     
     return test_acc, class_acc, f1, mcc
 
+
 def main():
     data_dir = "./data"
-    batch_size = 128
+    batch_size = 64
     num_epochs = 10
     
-    # The class names we'll use (first 4 CIFAR10 classes)
-    classes = [0, 1, 2, 3]  # airplane, automobile, bird, cat
+    # Set the target ratio: for every dog image, only 1 cat image is retained.
+    target_ratio = 20  # That is, cat:dog = 1:20
+    
+    # Use only classes [3, 5]: cat (3) and dog (5)
+    classes = [3, 5]
     
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
@@ -334,8 +421,10 @@ def main():
     ])
 
     print("Loading CIFAR10 dataset...")
-    full_train_dataset = CIFAR10Subset(root=data_dir, train=True, transform=transform_train, classes=classes)
-    test_dataset = CIFAR10Subset(root=data_dir, train=False, transform=transform_test, classes=classes)
+    full_train_dataset = CIFAR10Subset(root=data_dir, train=True, transform=transform_train,
+                                       download=True, classes=classes, ratio=target_ratio)
+    test_dataset = CIFAR10Subset(root=data_dir, train=False, transform=transform_test,
+                                 download=True, classes=classes, ratio=target_ratio)
     
     train_size = int(0.9 * len(full_train_dataset))
     val_size = len(full_train_dataset) - train_size
@@ -350,10 +439,16 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     print("Initializing ResNetUNet model...")
-    model = ResNetUNet(n_classes=4)  # 4 classes
-
-    # Evaluate models saved from training with Focal Loss and Focal-Dice Loss
+    model = ResNetUNet(n_classes=2)  # 2 classes: cat and dog
+    
+    # Train using Focal Loss.
+    #history = train_model_focal_dice(model, train_loader, val_loader, num_epochs=num_epochs)
+    print("Training complete. Best model saved as 'best_model_cifar_focal_dice.pth'.")
+    
+    # Evaluate trained model on test set.
     evaluate_model('best_model_cifar_focal.pth', test_loader)
+    
+    # Optionally, if also training with focal-dice loss:
     evaluate_model('best_model_cifar_focal_dice.pth', test_loader)
 
 if __name__ == "__main__":

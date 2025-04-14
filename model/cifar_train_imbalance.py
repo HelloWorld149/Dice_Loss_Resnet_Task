@@ -34,8 +34,8 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
     
     model = model.to(device)
     
-    # Define FocalLoss with weights for 4 classes
-    alpha = [1.0, 1.0, 1.0, 1.0]  # Equal weights for all classes
+    # Define FocalLoss with weights for 4 classes - giving more weight to minority classes
+    alpha = [10.0, 10.0, 10.0, 1.0]  # Higher weights for minority classes (assuming class 3 is majority)
     criterion = FocalLoss(gamma=2, alpha=alpha, reduction="mean")
     if hasattr(criterion, 'alpha') and criterion.alpha is not None:
         criterion.alpha = criterion.alpha.to(device)
@@ -135,21 +135,42 @@ def train_model_focal(model, train_loader, val_loader, num_epochs=10):
                 break
     return history
 
-def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
+def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10, checkpoint_path=None, continue_epochs=5):
     """
     Applies a training loop using Focal-Dice Loss on CIFAR10 dataset.
+    Can continue training from a checkpoint if provided.
+    
+    Args:
+        continue_epochs: Number of additional epochs to train when resuming from checkpoint
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     model = model.to(device)
     
-    alpha = [0.5, 0.5, 0.5, 0.5]
+    # Reduce the weight disparity to improve majority class performance
+    # Current weights [10.0, 10.0, 10.0, 1.0] may be too extreme
+    alpha = [5.0, 5.0, 5.0, 2.0]  # More balanced weights that still prioritize minority classes
     criterion = Focal_Dice_Loss(gamma=2, alpha=alpha, weights={'focal': 0.5, 'dice': 0.5})
     if hasattr(criterion, 'alpha') and criterion.alpha is not None:
         criterion.alpha = criterion.alpha.to(device)
     
-    optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+    
+    # Load from checkpoint if provided
+    best_val_loss = float('inf')
+    start_epoch = 0
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        best_val_loss = checkpoint['loss']
+        start_epoch = checkpoint['epoch'] + 1
+        # Adjust num_epochs to ensure we train for additional epochs beyond the checkpoint
+        num_epochs = start_epoch + continue_epochs
+        print(f"Loaded checkpoint from epoch {checkpoint['epoch']} with validation loss: {best_val_loss:.4f}")
+        print(f"Will continue training for {continue_epochs} more epochs (until epoch {num_epochs})")
     
     scheduler = OneCycleLR(
         optimizer,
@@ -158,7 +179,6 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
         steps_per_epoch=len(train_loader)
     )
     
-    best_val_loss = float('inf')
     patience = 10 
     patience_counter = 0
     
@@ -169,7 +189,7 @@ def train_model_focal_dice(model, train_loader, val_loader, num_epochs=10):
         'val_acc': []
     }
     
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()  
         train_loss = 0  
         train_correct = 0
@@ -260,7 +280,7 @@ def evaluate_model(model_path, test_loader, n_classes=4):
     model = ResNetUNet(n_classes=n_classes)
     model.to(device)
     
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
@@ -315,8 +335,8 @@ def evaluate_model(model_path, test_loader, n_classes=4):
 
 def main():
     data_dir = "./data"
-    batch_size = 128
-    num_epochs = 10
+    batch_size = 64
+    num_epochs = 5
     
     # The class names we'll use (first 4 CIFAR10 classes)
     classes = [0, 1, 2, 3]  # airplane, automobile, bird, cat
@@ -350,10 +370,22 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     print("Initializing ResNetUNet model...")
-    model = ResNetUNet(n_classes=4)  # 4 classes
+    #model = ResNetUNet(n_classes=4)  # 4 classes
+
+    # Train with Focal Loss
+    #print("\n=== Training with Focal Loss ===")
+    #focal_model = ResNetUNet(n_classes=4)
+    #train_model_focal(focal_model, train_loader, val_loader, num_epochs=num_epochs)
+    
+    # Train with Focal-Dice Loss from checkpoint if exists
+    print("\n=== Training with Focal-Dice Loss ===")
+    #focal_dice_model = ResNetUNet(n_classes=4)
+    #train_model_focal_dice(focal_dice_model, train_loader, val_loader, num_epochs=num_epochs, 
+    #                       checkpoint_path='best_model_cifar_focal_dice.pth', continue_epochs=5)
 
     # Evaluate models saved from training with Focal Loss and Focal-Dice Loss
-    evaluate_model('best_model_cifar_focal.pth', test_loader)
+    print("\n=== Evaluating Models ===")
+    #evaluate_model('best_model_cifar_focal.pth', test_loader)
     evaluate_model('best_model_cifar_focal_dice.pth', test_loader)
 
 if __name__ == "__main__":
