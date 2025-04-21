@@ -1,0 +1,20 @@
+
+Test Evaluation Results for best_model_cifar_focal.pth:
+Overall Test Accuracy: 93.20%
+Per-class Test Accuracy:
+  airplane: 95.00%
+  automobile: 97.30%
+  bird: 89.70%
+  cat: 90.80%
+Weighted F1 Score: 0.9320
+Matthews Correlation Coefficient (MCC): 0.9094
+
+Test Evaluation Results for best_model_cifar_focal_dice.pth:
+Overall Test Accuracy: 94.08%
+Per-class Test Accuracy:
+  airplane: 94.70%
+  automobile: 98.00%
+  bird: 92.00%
+  cat: 91.60%
+Weighted F1 Score: 0.9408
+Matthews Correlation Coefficient (MCC): 0.9210

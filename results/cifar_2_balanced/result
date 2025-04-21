@@ -1,0 +1,15 @@
+Test Evaluation Results for best_model_cifar_focal_dice.pth:       
+Overall Test Accuracy: 85.40%
+Per-class Test Accuracy:
+  cat: 84.90%
+  dog: 85.90%
+Weighted F1 Score: 0.8540
+Matthews Correlation Coefficient (MCC): 0.7080
+
+Test Evaluation Results for best_model_cifar_focal.pth:
+Overall Test Accuracy: 83.60%
+Per-class Test Accuracy:
+  cat: 85.20%
+  dog: 82.00%
+Weighted F1 Score: 0.8360
+Matthews Correlation Coefficient (MCC): 0.6723

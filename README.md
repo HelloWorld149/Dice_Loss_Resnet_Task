@@ -64,4 +64,4 @@ You can modify the training parameters by editing the `main()` function in `cifa
 - numpy
 
 ## Results
-The model achieves improved accuracy on CIFAR10 classification tasks, especially with the combined Focal-Dice loss function. Early experiments show that the Focal-Dice loss helps the model converge faster and achieve better validation accuracy compared to standard cross-entropy loss.
+The model achieves improved accuracy on four classes of the CIFAR10 classification tasks, especially with the combined Focal-Dice loss function. Early experiments show that the Focal-Dice loss helps the model converge faster and achieve better validation accuracy compared to focal loss.
